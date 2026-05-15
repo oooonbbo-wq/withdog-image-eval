@@ -1,0 +1,4 @@
+﻿row_type,name,group,n,llm_acc,llm_prec,llm_rec,llm_f1,cv_acc,cv_prec,cv_rec,cv_f1,delta_f1,winner,note
+overall,ALL_ITEMS_MACRO,,139,,,,,,,,,,NA,
+level_metric,exact_match,,139,0.3597,,,,0.0647,,,,,,
+level_metric,within_1,,139,0.7338,,,,0.2302,,,,,,

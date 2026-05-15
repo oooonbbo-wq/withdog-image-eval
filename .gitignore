@@ -1,0 +1,32 @@
+# 환경
+.env
+
+# Python / 가상환경
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+withdog.venv/
+*.egg-info/
+
+# 대용량 이미지 (재배포 불가)
+data/eval_images/
+data/FP_test_image/
+data/raw/
+
+# 모델 가중치 (대용량 바이너리)
+models/*.pt
+models/*.pth
+
+# 큰 결과 파일만 (예: PNG/JPG 출력물)
+results/**/*.png
+results/**/*.jpg
+
+# Claude Code 메모리 (로컬 전용)
+.claude/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

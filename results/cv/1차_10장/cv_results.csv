@@ -1,0 +1,11 @@
+﻿image_id,dog_visible,face_clear,no_duplicate_face_parts,no_extra_legs,one_dog,no_mirror,no_multi_panel,pastel_style,no_realistic_rendering,human_prompt_consistency,human_face_clear,prompt_reflected,brightness_ok,sharpness_ok,pastel_color_ok,time_palette_ok,place_context_ok,no_text,total_score,raw_level,caps_applied,final_level,dog_count,error
+20260415_100820_048b3f,0,,,,,,1,,,,,,1,0,1,,,1,4,L1,dog_visible->L0,L0,0,
+20260415_101812_e8a482,0,,,,,,1,,,,,,1,0,1,,,1,4,L1,dog_visible->L0,L0,0,
+20260415_104723_a91139,0,,,,,,1,,,,,,1,0,1,,,1,4,L1,dog_visible->L0,L0,0,
+20260415_105503_770317,0,,,,,,1,,,,,,1,0,1,,,1,4,L1,dog_visible->L0,L0,0,
+20260415_113143_64da8a,0,,,,,,1,,,,,,1,0,1,,,1,4,L1,dog_visible->L0,L0,0,
+20260415_135430_4dcd30,0,,,,,,1,,,,,,1,0,1,,,1,4,L1,dog_visible->L0,L0,0,
+20260415_150630_acd529,0,,,,,,1,,,,,,1,0,1,,,1,4,L1,dog_visible->L0,L0,0,
+20260415_151718_79edfe,0,,,,,,1,,,,,,1,1,1,,,1,5,L1,dog_visible->L0,L0,0,
+20260415_152316_c486a4,0,,,,,,1,,,,,,1,0,1,,,0,3,L1,"dog_visible->L0,no_text->L3",L0,0,
+20260415_152612_8817b3,0,,,,,,1,,,,,,1,0,1,,,1,4,L1,dog_visible->L0,L0,0,

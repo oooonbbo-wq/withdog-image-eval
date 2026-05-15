@@ -1,0 +1,4 @@
+﻿row_type,name,group,n,llm_acc,llm_prec,llm_rec,llm_f1,cv_acc,cv_prec,cv_rec,cv_f1,delta_f1,winner,note
+overall,ALL_ITEMS_MACRO,,10,,,,,,,,,,NA,
+level_metric,exact_match,,10,0.5000,,,,0.0000,,,,,LLM,max_L1_cap
+level_metric,within_1,,10,0.9000,,,,0.1000,,,,,LLM,max_L1_cap

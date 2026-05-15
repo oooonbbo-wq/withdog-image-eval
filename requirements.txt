@@ -1,0 +1,22 @@
+# ===== Core =====
+pandas>=2.0
+numpy>=1.24
+pillow>=10.0
+opencv-python>=4.8
+scikit-learn>=1.3
+tqdm>=4.66
+python-dotenv>=1.0
+
+# ===== LLM (Claude API) =====
+anthropic>=0.40
+
+# ===== CV (MVP 7개 항목) =====
+# Windows에서는 PyTorch CPU 버전이 자동 설치됨 (ultralytics/easyocr 의존성).
+# GPU 사용 시 https://pytorch.org/get-started/locally/ 에서 CUDA 버전 별도 설치.
+ultralytics>=8.1            # YOLOv8 (dog_visible, one_dog)
+easyocr>=1.7                # 한국어/영어 OCR (no_text)
+
+# ===== Phase 2+ (MVP에서는 주석 처리) =====
+open-clip-torch>=2.24      # CLIP zero-shot 의미 항목 (dog_visible, Phase2+)
+# retina-face>=0.0.13       # human_face_clear (tensorflow 의존)
+# deeplabcut>=2.3           # 강아지 키포인트 (no_extra_legs 등)
