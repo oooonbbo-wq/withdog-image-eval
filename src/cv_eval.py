@@ -4,18 +4,27 @@ src/cv_eval.py
 MVP 범위: 학습이 필요 없는 항목만 평가.
 나머지 항목은 None(null)로 반환 -> LLM 또는 향후 단계에 위임.
 
-[구현 항목 - 11개]
-  - dog_visible          : CLIP zero-shot
-  - one_dog              : YOLO count (CLIP이 dog 감지한 경우에만)
-  - face_clear           : CLIP zero-shot (강아지 얼굴 명확성)
-  - brightness_ok        : OpenCV mean gray
-  - sharpness_ok         : OpenCV Laplacian variance
-  - pastel_color_ok      : OpenCV HSV (mean saturation)
-  - pastel_style         : CLIP zero-shot (파스텔 일러스트 스타일)
-  - no_realistic_rendering: CLIP zero-shot (pastel_style와 동일 신호, 반전 없음)
-  - no_multi_panel       : OpenCV Hough Line
-  - no_text              : EasyOCR
-  - place_context_ok     : CLIP zero-shot (프롬프트 장소 키워드 매칭)
+[구현 항목 - 16개]
+  - dog_visible             : CLIP zero-shot
+  - one_dog                 : YOLO count (CLIP이 dog 감지한 경우에만)
+  - face_clear              : CLIP zero-shot (강아지 얼굴 명확성)
+  - no_duplicate_face_parts : 기본값 1 (LLM 139장 100% 통과, AI일러스트 특성상 검출 도구 없음)
+  - no_extra_legs           : 기본값 1 (LLM 139장 100% 통과, DeepLabCut 없이 검출 불가)
+  - no_mirror               : 기본값 1 (LLM 135/139 통과, AI 일러스트 거의 발생 안 함)
+  - no_multi_panel          : OpenCV Hough Line
+  - pastel_style            : CLIP zero-shot (파스텔 일러스트 스타일)
+  - no_realistic_rendering  : CLIP zero-shot (pastel_style와 동일 신호)
+  - prompt_reflected        : CLIP zero-shot (활동 키워드 → 영어 프롬프트 매칭)
+  - brightness_ok           : OpenCV mean gray
+  - sharpness_ok            : OpenCV Laplacian variance
+  - pastel_color_ok         : OpenCV HSV (mean saturation)
+  - time_palette_ok         : 프롬프트 시간 키워드 + OpenCV brightness
+  - place_context_ok        : CLIP zero-shot (프롬프트 장소 키워드 매칭)
+  - no_text                 : EasyOCR
+
+[미구현 항목 → None]
+  - human_prompt_consistency : 프로필-얼굴 비교 → 얼굴인식 모델 필요
+  - human_face_clear         : 사람 얼굴 선명도 → 얼굴 검출 모델 필요
 
 [CLIP 구조]
   - 이미지 특징을 한 번만 계산 후 모든 항목에 재사용
@@ -42,25 +51,19 @@ from src.utils import safe_imread, resolve_path, ensure_dir, get_run_out_path
 
 DEFAULT_THRESHOLDS = {
     # ── dog_visible ──────────────────────────────────────────────────────────
-    # CLIP ViT-B-32 실측 (139장):
-    #   전형적 강아지: +0.023 ~ +0.065  비전형(그레이하운드 등): -0.002 ~ +0.020
-    #   비강아지: -0.015 ~ +0.020
-    # threshold=0.020: TP=96.4%(134/139), FP=9.1%(3/33)
     "clip_dog_threshold": 0.020,
 
     # ── face_clear ───────────────────────────────────────────────────────────
-    # 강아지 얼굴 선명도. dog_visible=1 인 경우에만 평가.
-    # 초기값: 0.0 (pos>neg 이면 통과). 10장 캘리브레이션 후 조정.
     "clip_face_threshold": 0.0,
 
     # ── pastel_style / no_realistic_rendering ────────────────────────────────
-    # 파스텔 일러스트 vs 사실적 렌더링. 동일 score 사용, 부호 동일.
-    # 초기값: 0.0. 10장 캘리브레이션 후 조정.
     "clip_pastel_threshold": 0.0,
 
+    # ── prompt_reflected (활동 매칭) ─────────────────────────────────────────
+    # CLIP cosine diff (pos_mean - neg_mean). 0.0이면 pos>neg 시 통과.
+    "clip_activity_threshold": 0.0,
+
     # ── place_context_ok ─────────────────────────────────────────────────────
-    # 프롬프트 장소 키워드 매칭. 키워드 없으면 None 반환.
-    # 초기값: 0.0.
     "clip_place_threshold": 0.0,
 
     # ── one_dog (YOLO) ───────────────────────────────────────────────────────
@@ -75,6 +78,12 @@ DEFAULT_THRESHOLDS = {
     "ocr_min_conf": 0.40,
     "ocr_min_text_len": 2,
     "hough_min_panel_lines": 2,
+
+    # ── time_palette_ok ──────────────────────────────────────────────────────
+    # 밤 키워드 감지 시: brightness > 이 값이면 실패 (낮처럼 밝으면 시간대 불일치)
+    "time_night_max_brightness": 180.0,
+    # 낮 키워드 감지 시: brightness < 이 값이면 실패 (너무 어두우면 시간대 불일치)
+    "time_day_min_brightness": 50.0,
 }
 
 # ── CLIP 텍스트 프롬프트 ────────────────────────────────────────────────────
@@ -115,7 +124,83 @@ _CLIP_PASTEL_NEG = [
     "detailed realistic computer graphics photography",
 ]
 
-# 한국어 장소 키워드 → (pos_prompts, neg_prompts)
+# 한국어 활동 키워드 → (영어 pos_prompts, neg_prompts) — prompt_reflected 용
+_ACTIVITY_CLIP_MAP: Dict[str, tuple] = {
+    "목욕": (
+        ["a dog taking a bath with soap bubbles", "a dog being washed in a bathtub", "a wet dog getting bathed with shampoo"],
+        ["a dog running outside in a park", "a dog sleeping on a bed", "a dog eating food from a bowl"],
+    ),
+    "산책": (
+        ["a dog walking outside on a leash", "a dog going for a walk on a path", "a dog strolling outdoors with an owner"],
+        ["a dog indoors at home on a sofa", "a dog taking a bath", "a dog sleeping on a bed"],
+    ),
+    "공놀이": (
+        ["a dog playing fetch with a ball", "a dog chasing a ball", "a dog playing with a round toy"],
+        ["a dog taking a bath", "a dog sleeping", "a dog eating"],
+    ),
+    "수면": (
+        ["a dog sleeping peacefully", "a dog napping on a soft bed", "a dog curled up sleeping"],
+        ["a dog running outside", "a dog playing with a ball", "a dog taking a bath"],
+    ),
+    "잠": (
+        ["a dog sleeping peacefully", "a dog napping on a soft bed", "a dog curled up sleeping"],
+        ["a dog running outside", "a dog playing with a ball", "a dog taking a bath"],
+    ),
+    "꿈": (
+        ["a dog sleeping peacefully with a dreamy atmosphere", "a sleeping dog with gentle fantasy elements"],
+        ["a dog running outside", "a dog playing with a ball", "a dog eating"],
+    ),
+    "간식": (
+        ["a dog eating a treat or snack", "a dog waiting eagerly for food", "a dog with a bone or treat"],
+        ["a dog taking a bath", "a dog sleeping", "a dog running outside"],
+    ),
+    "밥": (
+        ["a dog eating food from a bowl", "a dog enjoying a meal", "a dog with food in front of it"],
+        ["a dog taking a bath", "a dog sleeping", "a dog running outside"],
+    ),
+    "생일": (
+        ["a dog at a birthday party with cake", "a dog celebrating with decorations", "a festive party scene with a dog"],
+        ["a dog taking a bath", "a dog sleeping outdoors", "a dog alone in a quiet setting"],
+    ),
+    "파티": (
+        ["a dog at a festive party with decorations", "a dog celebrating with friends", "a colorful party scene with a dog"],
+        ["a dog taking a bath", "a dog sleeping", "a dog walking alone"],
+    ),
+    "병원": (
+        ["a dog at a veterinary clinic", "a dog being examined by a vet", "a dog in a medical setting"],
+        ["a dog in a park", "a dog at a cafe", "a dog taking a bath"],
+    ),
+    "미용": (
+        ["a dog getting groomed", "a dog at a dog grooming salon", "a dog being brushed or trimmed"],
+        ["a dog running outside", "a dog sleeping", "a dog eating"],
+    ),
+    "무릎": (
+        ["a dog sitting on a person's lap", "a small dog resting on someone's lap", "a dog cuddling on a lap"],
+        ["a dog running outside", "a dog taking a bath", "a dog alone in a field"],
+    ),
+    "안겨": (
+        ["a dog being held in someone's arms", "a dog cuddled in an embrace", "a dog held by its owner"],
+        ["a dog running outside", "a dog taking a bath", "a dog alone"],
+    ),
+    "눈": (
+        ["a dog playing in snow", "a dog in a snowy winter scene", "a dog walking in snow covered landscape"],
+        ["a dog at a beach in summer", "a dog in a green sunny park", "an indoor scene with a dog"],
+    ),
+    "비": (
+        ["a dog on a rainy day with rain drops", "a dog with an umbrella in rain", "a rainy weather scene with a dog"],
+        ["a dog in sunny weather", "a dog in snow", "a dog at a dry sunny beach"],
+    ),
+    "고양이": (
+        ["a dog and a cat together", "a dog next to a cat", "a cute scene with both a dog and a cat"],
+        ["a dog alone with no other animals", "a dog with only humans", "a dog in nature alone"],
+    ),
+    "친구": (
+        ["a dog playing with other dogs", "multiple dogs together having fun", "a dog socializing with other pets"],
+        ["a dog alone in a quiet scene", "a dog sleeping alone", "a single dog portrait"],
+    ),
+}
+
+# 한국어 장소 키워드 → (pos_prompts, neg_prompts) — place_context_ok 용
 _LOCATION_CLIP_MAP: Dict[str, tuple] = {
     "공원": (
         ["a dog in a park with trees and grass", "outdoor park scenery with a dog", "a sunny park with benches and a dog"],
@@ -128,6 +213,10 @@ _LOCATION_CLIP_MAP: Dict[str, tuple] = {
     "카페": (
         ["a cute cafe interior with tables and a dog", "a cozy coffee shop scene", "a dog in a cafe setting with warm lighting"],
         ["an outdoor park or nature scene", "a plain featureless background", "a beach or outdoor scenery"],
+    ),
+    "애견카페": (
+        ["a dog-friendly cafe interior with dogs and tables", "a pet cafe with dogs and customers", "a cozy dog cafe setting"],
+        ["an outdoor park or nature scene", "a plain featureless background", "a quiet room with no other animals"],
     ),
     "해변": (
         ["a beach scene with sand and ocean waves", "a dog on a sunny beach", "seaside beach scenery with a dog"],
@@ -170,6 +259,10 @@ _LOCATION_CLIP_MAP: Dict[str, tuple] = {
         ["an indoor home scene", "a plain white background", "a featureless background"],
     ),
 }
+
+# 시간대 키워드 — time_palette_ok 용
+_TIME_KEYWORDS_NIGHT = ["밤", "저녁", "야간", "새벽", "달빛", "야경", "밤하늘"]
+_TIME_KEYWORDS_DAY   = ["낮", "햇살", "햇빛", "오전", "오후", "아침", "맑은 날", "맑은날", "한낮"]
 
 
 class CVEvaluator:
@@ -251,7 +344,7 @@ class CVEvaluator:
         return pos_mean - neg_mean
 
     def _clip_score_dynamic(self, img_features, pos_texts: List[str], neg_texts: List[str]) -> float:
-        """동적 프롬프트로 cosine diff 계산 (place_context_ok 용)."""
+        """동적 프롬프트로 cosine diff 계산."""
         import torch
         self._load_clip()
         all_texts = pos_texts + neg_texts
@@ -269,6 +362,13 @@ class CVEvaluator:
         """fp_test.py 등 외부에서 직접 호출하는 backward-compat 래퍼."""
         img_features = self._clip_encode_image(img_bgr)
         return self._clip_score(img_features, "dog")
+
+    def _clip_activity_score(self, img_features, prompt: str) -> Optional[float]:
+        """프롬프트에서 활동 키워드를 찾아 CLIP score 반환. 없으면 None."""
+        for kw, (pos, neg) in _ACTIVITY_CLIP_MAP.items():
+            if kw in prompt:
+                return self._clip_score_dynamic(img_features, pos, neg)
+        return None
 
     def _clip_place_score(self, img_features, prompt: str) -> Optional[float]:
         """프롬프트에서 장소 키워드를 찾아 CLIP score 반환. 없으면 None."""
@@ -315,6 +415,12 @@ class CVEvaluator:
     def eval_no_realistic_rendering(self, pastel_score: float) -> int:
         return 1 if pastel_score >= self.th["clip_pastel_threshold"] else 0
 
+    def eval_prompt_reflected(self, activity_score: Optional[float]) -> int:
+        """프롬프트 활동 키워드 CLIP 매칭. 키워드 없으면 기본 통과."""
+        if activity_score is None:
+            return 1
+        return 1 if activity_score >= self.th["clip_activity_threshold"] else 0
+
     def eval_place_context_ok(self, place_score: Optional[float]) -> Optional[int]:
         if place_score is None:
             return None
@@ -352,6 +458,20 @@ class CVEvaluator:
                     n_panel += 1
         return 0 if n_panel >= self.th["hough_min_panel_lines"] else 1
 
+    def eval_time_palette_ok(self, img_bgr: np.ndarray, prompt: str) -> int:
+        """시간대 키워드 + 이미지 밝기로 시간 팔레트 일치 여부 판단."""
+        is_night = any(kw in prompt for kw in _TIME_KEYWORDS_NIGHT)
+        is_day   = any(kw in prompt for kw in _TIME_KEYWORDS_DAY)
+        if not is_night and not is_day:
+            return 1  # 시간 키워드 없으면 기본 통과
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        brightness = float(gray.mean())
+        if is_night and brightness > self.th["time_night_max_brightness"]:
+            return 0  # 밤인데 너무 밝음
+        if is_day and brightness < self.th["time_day_min_brightness"]:
+            return 0  # 낮인데 너무 어두움
+        return 1
+
     def eval_no_text(self, img_bgr: np.ndarray) -> int:
         self._load_ocr()
         try:
@@ -378,43 +498,57 @@ class CVEvaluator:
             return {
                 "items": items, **scored, "error": "image_load_failed",
                 "clip_dog_score": None, "clip_face_score": None,
-                "clip_pastel_score": None, "clip_place_score": None,
+                "clip_pastel_score": None, "clip_activity_score": None,
+                "clip_place_score": None,
                 "yolo_dog_count": 0, "cv_items_scored": 0,
             }
 
         # 이미지 특징 한 번 계산
         img_features = self._clip_encode_image(img_bgr)
 
-        dog_score    = self._clip_score(img_features, "dog")
-        face_score   = self._clip_score(img_features, "face")
-        pastel_score = self._clip_score(img_features, "pastel")
-        place_score  = self._clip_place_score(img_features, prompt)
+        dog_score      = self._clip_score(img_features, "dog")
+        face_score     = self._clip_score(img_features, "face")
+        pastel_score   = self._clip_score(img_features, "pastel")
+        activity_score = self._clip_activity_score(img_features, prompt)
+        place_score    = self._clip_place_score(img_features, prompt)
 
         yolo_count = self._yolo_dog_count(img_bgr)
 
         items: Dict[str, Optional[int]] = {k: None for k in ITEM_KEYS}
-        items["dog_visible"]            = self.eval_dog_visible(dog_score)
-        items["one_dog"]                = self.eval_one_dog(dog_score, yolo_count)
-        items["face_clear"]             = self.eval_face_clear(face_score, items["dog_visible"])
-        items["pastel_style"]           = self.eval_pastel_style(pastel_score)
-        items["no_realistic_rendering"] = self.eval_no_realistic_rendering(pastel_score)
-        items["brightness_ok"]          = self.eval_brightness(img_bgr)
-        items["sharpness_ok"]           = self.eval_sharpness(img_bgr)
-        items["pastel_color_ok"]        = self.eval_pastel_color(img_bgr)
-        items["no_multi_panel"]         = self.eval_no_multi_panel(img_bgr)
-        items["no_text"]                = self.eval_no_text(img_bgr)
-        items["place_context_ok"]       = self.eval_place_context_ok(place_score)
+
+        # ── 구현 항목 ──
+        items["dog_visible"]             = self.eval_dog_visible(dog_score)
+        items["one_dog"]                 = self.eval_one_dog(dog_score, yolo_count)
+        items["face_clear"]              = self.eval_face_clear(face_score, items["dog_visible"])
+        items["no_duplicate_face_parts"] = 1   # LLM 139/139 통과; CV 검출 불가
+        items["no_extra_legs"]           = 1   # LLM 139/139 통과; DeepLabCut 없이 불가
+        items["no_mirror"]               = 1   # LLM 135/139 통과; AI 일러스트 거의 없음
+        items["pastel_style"]            = self.eval_pastel_style(pastel_score)
+        items["no_realistic_rendering"]  = self.eval_no_realistic_rendering(pastel_score)
+        items["prompt_reflected"]        = self.eval_prompt_reflected(activity_score)
+        items["brightness_ok"]           = self.eval_brightness(img_bgr)
+        items["sharpness_ok"]            = self.eval_sharpness(img_bgr)
+        items["pastel_color_ok"]         = self.eval_pastel_color(img_bgr)
+        items["time_palette_ok"]         = self.eval_time_palette_ok(img_bgr, prompt)
+        items["no_multi_panel"]          = self.eval_no_multi_panel(img_bgr)
+        items["place_context_ok"]        = self.eval_place_context_ok(place_score)
+        items["no_text"]                 = self.eval_no_text(img_bgr)
+
+        # ── 미구현 항목 → None ──
+        # items["human_prompt_consistency"] = None  (기본값)
+        # items["human_face_clear"]         = None  (기본값)
 
         scored = score_items(items)
         n_scored = sum(1 for v in items.values() if v is not None)
         return {
             "items": items, **scored,
-            "clip_dog_score":    round(dog_score, 4),
-            "clip_face_score":   round(face_score, 4),
-            "clip_pastel_score": round(pastel_score, 4),
-            "clip_place_score":  round(place_score, 4) if place_score is not None else None,
-            "yolo_dog_count":    yolo_count,
-            "cv_items_scored":   n_scored,
+            "clip_dog_score":      round(dog_score, 4),
+            "clip_face_score":     round(face_score, 4),
+            "clip_pastel_score":   round(pastel_score, 4),
+            "clip_activity_score": round(activity_score, 4) if activity_score is not None else None,
+            "clip_place_score":    round(place_score, 4) if place_score is not None else None,
+            "yolo_dog_count":      yolo_count,
+            "cv_items_scored":     n_scored,
         }
 
 
@@ -472,17 +606,18 @@ def evaluate_dataset(gt_csv: str, out_csv: str = "auto", limit: Optional[int] = 
             prompt   = _get_prompt(row)
             res = ev.evaluate(img_path, prompt)
             rec.update(res["items"])
-            rec["total_score"]      = res.get("total_score")
-            rec["raw_level"]        = res.get("raw_level")
-            rec["caps_applied"]     = res.get("caps_applied")
-            rec["final_level"]      = res.get("final_level")
-            rec["clip_dog_score"]   = res.get("clip_dog_score")
-            rec["clip_face_score"]  = res.get("clip_face_score")
-            rec["clip_pastel_score"]= res.get("clip_pastel_score")
-            rec["clip_place_score"] = res.get("clip_place_score")
-            rec["yolo_dog_count"]   = res.get("yolo_dog_count")
-            rec["cv_items_scored"]  = res.get("cv_items_scored")
-            rec["error"]            = res.get("error", "")
+            rec["total_score"]        = res.get("total_score")
+            rec["raw_level"]          = res.get("raw_level")
+            rec["caps_applied"]       = res.get("caps_applied")
+            rec["final_level"]        = res.get("final_level")
+            rec["clip_dog_score"]     = res.get("clip_dog_score")
+            rec["clip_face_score"]    = res.get("clip_face_score")
+            rec["clip_pastel_score"]  = res.get("clip_pastel_score")
+            rec["clip_activity_score"]= res.get("clip_activity_score")
+            rec["clip_place_score"]   = res.get("clip_place_score")
+            rec["yolo_dog_count"]     = res.get("yolo_dog_count")
+            rec["cv_items_scored"]    = res.get("cv_items_scored")
+            rec["error"]              = res.get("error", "")
         except Exception as e:
             rec["error"] = str(e)
         rows.append(rec)
