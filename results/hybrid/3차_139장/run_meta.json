@@ -1,0 +1,46 @@
+{
+  "run_at": "2026-05-18T06:33:58",
+  "git_hash": "428f514",
+  "model": "gpt-4o",
+  "n_images": 139,
+  "cv_items": [
+    "brightness_ok",
+    "dog_visible",
+    "no_multi_panel",
+    "no_text",
+    "pastel_color_ok",
+    "sharpness_ok"
+  ],
+  "llm_items": [
+    "face_clear",
+    "human_face_clear",
+    "human_prompt_consistency",
+    "no_duplicate_face_parts",
+    "no_extra_legs",
+    "no_mirror",
+    "no_realistic_rendering",
+    "one_dog",
+    "pastel_style",
+    "place_context_ok",
+    "prompt_reflected",
+    "time_palette_ok"
+  ],
+  "cv_thresholds": {
+    "clip_dog_threshold": 0.02,
+    "clip_face_threshold": 0.0,
+    "clip_pastel_threshold": 0.0,
+    "clip_activity_threshold": 0.0,
+    "clip_place_threshold": 0.0,
+    "yolo_conf": 0.1,
+    "brightness_min": 55.0,
+    "brightness_max": 215.0,
+    "sharpness_var_min": 80.0,
+    "hsv_sat_min": 20.0,
+    "hsv_sat_max": 165.0,
+    "ocr_min_conf": 0.4,
+    "ocr_min_text_len": 2,
+    "hough_min_panel_lines": 2,
+    "time_night_max_brightness": 180.0,
+    "time_day_min_brightness": 50.0
+  }
+}

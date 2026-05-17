@@ -6,14 +6,17 @@ LLM + CV 하이브리드 평가기.
 [분배 전략 — 시뮬레이션 근거]
   139장 실측 데이터로 CV7 / LLM4 / 하이브리드 조합을 비교한 결과:
 
-  | 전략              | Exact | ±1    | MAE   | 편향   |
-  |-------------------|-------|-------|-------|--------|
-  | CV7 (16항목)      | 28.1% | 79.1% | 0.986 | -0.18  |
-  | LLM4 (18항목)     | 34.5% | 71.2% | 1.079 | +0.68  |
-  | Hybrid (이 파일)  | 37.4% | 73.4% | 1.050 | +0.48  |
+  139장 실측 결과 (3차 실험, gpt-4o):
+
+  | 전략              | Exact | ±1    | MAE   | 편향   | 비용    |
+  |-------------------|-------|-------|-------|--------|---------|
+  | CV7 (16항목)      | 28.1% | 79.1% | 0.986 | -0.18  | $0      |
+  | LLM4 (18항목)     | 34.5% | 71.2% | 1.079 | +0.68  | ~$1.58  |
+  | Hybrid (이 파일)  | 37.4% | 72.7% | 1.065 | +0.53  | $1.10   |
 
   Hybrid는 정확 일치율(37.4%)에서 CV7(28.1%)·LLM(34.5%)을 모두 앞서며,
-  ±1 정확도(73.4%)는 LLM(71.2%)보다 높다.
+  ±1 정확도(72.7%)는 LLM(71.2%)보다 높다.
+  출력 토큰 -30.2% 절감 (LLM-only 실측 563 tok → Hybrid 393 tok).
 
 [CV 담당 항목 — 6개 (객관적 측정값)]
   dog_visible      CLIP zero-shot + 실측 임계값 (96.4% 검출률)
@@ -157,6 +160,8 @@ def _parse_llm_response(raw: str) -> Tuple[Dict, Dict]:
         text = text.strip("` \n")
     obj = json.loads(text)
     items_raw = obj.get("items", {})
+    if not items_raw:
+        raise ValueError(f"LLM 응답에 items 키 없음: {text[:200]}")
 
     items: Dict[str, Optional[int]] = {}
     reasons: Dict[str, str] = {}
@@ -196,12 +201,17 @@ def _llm_evaluate_subjective(image_path: str, prompt: str, client,
                 ],
             )
             raw = resp.choices[0].message.content
+            in_tok  = resp.usage.prompt_tokens
+            out_tok = resp.usage.completion_tokens
+            # 파싱 실패는 재시도하지 않음 (이미 API 비용이 청구됨)
             items, reasons = _parse_llm_response(raw)
-            return items, reasons, resp.usage.prompt_tokens, resp.usage.completion_tokens
+            return items, reasons, in_tok, out_tok
+        except ValueError:
+            raise  # JSON 파싱·items 키 오류 → 재시도 없이 상위로 전파
         except Exception as e:
             last_err = e
             time.sleep(1.5 * (attempt + 1))
-    raise RuntimeError(f"LLM 평가 실패: {last_err}")
+    raise RuntimeError(f"LLM API 호출 실패 ({max_retries}회 재시도): {last_err}")
 
 
 # ── 하이브리드 평가기 ─────────────────────────────────────────────────────────
@@ -329,9 +339,35 @@ def _get_prompt(row: pd.Series) -> str:
     return ""
 
 
+def _save_run_meta(out_path: Path, model: str, n: int, ev: "HybridEvaluator") -> None:
+    """실험 재현에 필요한 메타 정보를 run_meta.json으로 저장."""
+    import subprocess, datetime
+    try:
+        git_hash = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"], stderr=subprocess.DEVNULL
+        ).decode().strip()
+    except Exception:
+        git_hash = "unknown"
+
+    meta = {
+        "run_at":    datetime.datetime.now().isoformat(timespec="seconds"),
+        "git_hash":  git_hash,
+        "model":     model,
+        "n_images":  n,
+        "cv_items":  sorted(CV_ITEMS),
+        "llm_items": sorted(LLM_ITEMS),
+        "cv_thresholds": ev._cv.th,
+    }
+    meta_path = out_path.parent / "run_meta.json"
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+    print(f"[Hybrid] meta → {meta_path}")
+
+
 def evaluate_dataset(gt_csv: str, out_csv: str = "auto",
                      model: str = "gpt-4o",
-                     limit: Optional[int] = None) -> None:
+                     limit: Optional[int] = None,
+                     checkpoint_every: int = 20) -> None:
     load_env()
     gt_path = resolve_path(gt_csv)
     df = pd.read_csv(gt_path)
@@ -350,10 +386,12 @@ def evaluate_dataset(gt_csv: str, out_csv: str = "auto",
         out_path = ensure_dir(out_csv)
 
     ev = HybridEvaluator(llm_model=model)
+    _save_run_meta(out_path, model, len(df), ev)
+
     rows = []
     total_in = total_out = 0
 
-    for _, row in tqdm(df.iterrows(), total=len(df), desc="Hybrid eval"):
+    for i, (_, row) in enumerate(tqdm(df.iterrows(), total=len(df), desc="Hybrid eval")):
         image_id = _get_image_id(row)
         rec = {"image_id": image_id}
         try:
@@ -364,7 +402,7 @@ def evaluate_dataset(gt_csv: str, out_csv: str = "auto",
             rec.update(res["items"])
             rec["total_score"]  = res["total_score"]
             rec["raw_level"]    = res["raw_level"]
-            rec["caps_applied"] = res["caps_applied"]
+            rec["caps_applied"] = json.dumps(res["caps_applied"], ensure_ascii=False)
             rec["final_level"]  = res["final_level"]
 
             for k, v in res["cv_scores"].items():
@@ -380,15 +418,41 @@ def evaluate_dataset(gt_csv: str, out_csv: str = "auto",
             rec["error"] = str(e)
         rows.append(rec)
 
+        # 중간 저장 (API 중단 대비)
+        if (i + 1) % checkpoint_every == 0:
+            pd.DataFrame(rows).to_csv(out_path, index=False, encoding="utf-8-sig")
+
     out_df = pd.DataFrame(rows)
     out_df.to_csv(out_path, index=False, encoding="utf-8-sig")
     print(f"[Hybrid] saved → {out_path}  (n={len(out_df)})")
 
+    # dog_visible=0 스킵 통계
+    skipped = sum(1 for r in rows if r.get("dog_visible") == 0)
+    evaluated = len(rows) - skipped
+    if skipped:
+        print(f"[Hybrid] dog_visible=0 LLM skip: {skipped}/{len(rows)} ({skipped/len(rows)*100:.1f}%)")
+
     if total_in + total_out > 0:
-        # gpt-4o: $2.50/$10 per MTok (input/output)
-        cost = total_in / 1_000_000 * 2.5 + total_out / 1_000_000 * 10.0
-        print(f"[Hybrid] tokens: in={total_in:,}  out={total_out:,}  est ${cost:.4f}")
-        print(f"[Hybrid] 절감: LLM 전체 대비 출력 토큰 ~40% 감소 (18항목→12항목)")
+        # 모델별 단가 테이블 ($/MTok: input, output)
+        _PRICING = {
+            "gpt-4o":           (2.50, 10.00),
+            "gpt-4o-mini":      (0.15,  0.60),
+            "gpt-4o-2024-11-20":(2.50, 10.00),
+        }
+        rates = _PRICING.get(model)
+        avg_out = total_out / evaluated if evaluated > 0 else 0
+        print(f"[Hybrid] tokens: in={total_in:,}  out={total_out:,}")
+        if rates:
+            cost = total_in / 1e6 * rates[0] + total_out / 1e6 * rates[1]
+            print(f"[Hybrid] est ${cost:.4f} ({model})")
+        else:
+            print(f"[Hybrid] 비용 미산출 — 미등록 모델: {model}")
+        # LLM 4차 실측 baseline (18항목, 139장 평균 output=563.2 tok)
+        _LLM_BASELINE_OUT = 563.2
+        if avg_out > 0:
+            reduction = (1 - avg_out / _LLM_BASELINE_OUT) * 100
+            print(f"[Hybrid] 출력 토큰 평균: {avg_out:.0f} tok "
+                  f"(LLM-only 실측 {_LLM_BASELINE_OUT:.0f} tok 대비 -{reduction:.1f}%)")
 
 
 if __name__ == "__main__":
